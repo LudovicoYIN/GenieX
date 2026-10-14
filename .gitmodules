@@ -3,4 +3,4 @@
 	url = https://github.com/ggml-org/llama.cpp
 [submodule "third-party/geniex-qairt"]
 	path = third-party/geniex-qairt
-	url = https://github.com/qualcomm/geniex-qairt-plugin
+	url = https://github.com/LudovicoYIN/geniex-qairt-plugin.git
