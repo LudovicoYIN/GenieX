@@ -1,0 +1,4 @@
+interface:
+  display_name: "高通大模型转换与 GenieX 适配"
+  short_description: "整理高通模型转换接口，完成 GenieX 状态适配、板端验证和性能排查"
+  default_prompt: "使用 $qualcomm-llm-adapt 检查这个高通模型包并完成 GenieX 适配与板端验证。"

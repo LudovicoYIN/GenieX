@@ -1,0 +1,13 @@
+{
+  "dialog": {
+    "engine": {
+      "model": {
+        "binary": {
+          "ctx-bins": [
+            "not-included-demo-context.bin"
+          ]
+        }
+      }
+    }
+  }
+}

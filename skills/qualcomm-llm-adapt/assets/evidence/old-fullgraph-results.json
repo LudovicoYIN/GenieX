@@ -1,0 +1,83 @@
+{
+  "model": "qwen35-text-reference-fullgraph-v73-vtcm8.tar",
+  "qairt": "2.51.40.260930",
+  "input_tokens": 2048,
+  "output_tokens": 512,
+  "seed": 43,
+  "temperature": -1,
+  "main_cpu": 4,
+  "worker_cpu_mask": "0x58",
+  "workers": 3,
+  "warmup": false,
+  "cases": {
+    "normal": {
+      "runs": [
+        {
+          "ttft_ms": 2328.414,
+          "decode_tps": 30.83077373680539,
+          "effective_prefill_tps": 879.5686677712812
+        },
+        {
+          "ttft_ms": 2326.097,
+          "decode_tps": 30.808289162751045,
+          "effective_prefill_tps": 880.4447965841493
+        },
+        {
+          "ttft_ms": 2338.768,
+          "decode_tps": 30.77997786486748,
+          "effective_prefill_tps": 875.6747142085064
+        }
+      ],
+      "mean_decode_tps": 30.80634692147464,
+      "mean_effective_prefill_tps": 878.562726187979,
+      "mean_ttft_ms": 2331.0930000000003,
+      "mean_timing_ms_per_step": {
+        "total_us": 32.458701171875,
+        "graph_us": 31.678375,
+        "recurrent_us": 0.0,
+        "connections_us": 0.0,
+        "sample_us": 0.030380208333333335,
+        "wait_us": 0.738974609375,
+        "serial_kv_us": 0.0,
+        "worker_kv_us": 0.060768880208333334,
+        "recurrent_sync_us": 0.0
+      }
+    },
+    "deferred": {
+      "runs": [
+        {
+          "ttft_ms": 2318.993,
+          "decode_tps": 31.168578177125184,
+          "effective_prefill_tps": 883.1419499757008
+        },
+        {
+          "ttft_ms": 2321.455,
+          "decode_tps": 31.16645510609104,
+          "effective_prefill_tps": 882.2053410468866
+        },
+        {
+          "ttft_ms": 2322.243,
+          "decode_tps": 31.167483402858533,
+          "effective_prefill_tps": 881.905984860327
+        }
+      ],
+      "mean_decode_tps": 31.167505562024918,
+      "mean_effective_prefill_tps": 882.4177586276381,
+      "mean_ttft_ms": 2320.897,
+      "mean_timing_ms_per_step": {
+        "total_us": 32.082458984375,
+        "graph_us": 31.540860677083334,
+        "recurrent_us": 0.0,
+        "connections_us": 0.0,
+        "sample_us": 0.03015299479166667,
+        "wait_us": 0.5004615885416667,
+        "serial_kv_us": 0.0,
+        "worker_kv_us": 0.04270442708333333,
+        "recurrent_sync_us": 0.000875
+      }
+    }
+  },
+  "model_context_sha256": "5b41f384fe92919af74e32871e429a51648ab8b5082f6f0cc9a1a7244e5bdb5c",
+  "core_sha256": "17b26928d787ce7ae93bbb90eb4d022cb783e9f68ce5f5c655a777536c679c69",
+  "source_artifact": "assets/patches/qwen35-plugin.patch"
+}
