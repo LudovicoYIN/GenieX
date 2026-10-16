@@ -1,47 +1,50 @@
-# Qwen3.5 团队分支与上游同步
+# 从 main 开始适配与维护 feat
 
-本分支在官方 GenieX 之上维护 Qwen3.5 QAIRT 适配，技能入口为 [qualcomm-llm-adapt](../skills/qualcomm-llm-adapt/SKILL.md)，团队约定见 [AGENTS.md](../AGENTS.md)。技能随 feat 分支获取，无需另行下载；在支持本地 skill 的代码助手中可按目录加载，或复制该完整目录到助手的 skills 目录。
+团队工作入口为 [AGENTS.md](../AGENTS.md) 和 [qualcomm-llm-adapt skill](../skills/qualcomm-llm-adapt/SKILL.md)。别人拿到 main 后，可以直接阅读这些材料并创建自己的适配分支；不需要先取得现有 feat 的实现。
 
-## 仓库分工
+## 分支职责
 
-| 内容 | 位置 | 提交方式 |
-| --- | --- | --- |
-| 公共 API、插件 bridge、benchmark | GenieX 主仓库 sdk/ | 主仓库提交 |
-| Qwen3.5 图执行、状态反馈及数值适配 | third-party/geniex-qairt 子模块 | 先提交插件，再更新主仓库 gitlink |
-| 可复用适配 skill | skills/qualcomm-llm-adapt/ | 独立主仓库提交 |
-| 团队工作约定 | AGENTS.md、本文件 | 主仓库提交 |
+| 分支 | 内容 |
+| --- | --- |
+| main | 官方 GenieX 实现基线，加团队可复用的 skill、AGENTS.md 和工作说明 |
+| feat/... | 基于 main 的具体模型适配、构建修改、插件指针和验证记录 |
 
-子模块 URL 跟随团队 fork；不要将其替换为不包含适配提交的上游地址。Skill 中的历史基线 patch 是独立迁移参考，在此分支无需再次应用。
+已有 Qwen3.5 适配在 `feat/qwen35-runtime-speed-20261014`，它是可参考的已实现案例。main 不通过合并该 feat 来获得文档，也不因此获得它的运行时修改。模型、proprietary QAIRT 库和交付二进制不放进 skill。
 
-## 后续合并官方代码
+## 新同事从 main 开始
 
-当前长期维护分支名为 `feat/qwen35-runtime-speed-20261014`。名字中的日期不表示需要每天新建分支。保留 merge 历史，避免多人使用时重写远端 feat。
+```sh
+git switch main
+git pull --ff-only
+git switch -c feat/my-model-adaptation
+```
 
-建议把官方远端命名为 upstream，团队可写远端命名为 fork（实际已有名字可以保留）。先用 `git remote -v` 检查；以下 upstream 只在缺失时添加一次：
+1. 阅读 AGENTS.md，再按 SKILL.md 选择图接口、数值、状态反馈、部署或验证参考。
+2. 按模型转换交付契约清点现有模型包，确定目标板和需要修改的层次。
+3. 初始化所需子模块。参考补丁的基线与用法见 [构建部署](../skills/qualcomm-llm-adapt/references/geniex/build-deploy.md)。先 `git apply --check`，检查当前上游是否已包含相同实现，再决定应用或按语义移植；不盲目覆盖当前源码。
+4. 插件改动在 `third-party/geniex-qairt` 的独立 feat 分支提交并推送；再由主仓库记录可获取的子模块指针。不要只提交主仓库而遗漏插件实现。
+5. 按 skill 做对应验证，报告实际执行范围，提交自己的 feat。Skill 是过程与案例参考，不保证所有新模型自动获得相同速度或精度。
+
+Skill 可直接按仓库路径加载，也可以把完整 `skills/qualcomm-llm-adapt/` 复制到代码助手的 skills 目录。模型转换部分目前只定义交付契约，不是完整转换教程。
+
+## 持续同步上游
+
+建议官方远端名为 upstream、团队可写远端名为 fork；已有远端名不必强制更改。先检查 `git remote -v`；缺少官方远端时添加一次：
 
 ```sh
 git remote add upstream https://github.com/qualcomm/GenieX.git
 git fetch upstream main --recurse-submodules=no
-git switch feat/qwen35-runtime-speed-20261014
-git status --short
+git switch main
 git merge upstream/main
+# 检查和解决冲突后推送团队 main。
+git push fork main
+
+git switch feat/my-model-adaptation
+git merge main
 ```
 
-合并前处理或隔离未提交改动。第一次克隆此 feat 时按通常方式初始化子模块，插件内配置独立的官方 upstream：`https://github.com/qualcomm/geniex-qairt-plugin.git`。子模块默认可能处于 detached HEAD，先切到团队的插件 feat 分支，再 fetch/merge 官方 main。使用普通 fast-forward push，不强推。
+用普通 merge 保留团队 skill 和指南。不要用 `reset --hard upstream/main`、整目录覆盖或强推来同步。上游未改同路径时会自然保留这些文件；若未来产生同名目录或文件，仍需人工解决冲突。
 
-若发生 gitlink 冲突：在插件仓库确认主仓库两侧指针分别是什么、是否为祖先关系。插件 feat 已包含新的官方指针时保留该 feat；否则先合并插件的新上游并验证。插件推送成功后，再在主仓库 `git add third-party/geniex-qairt`，完成 merge。避免对未初始化子模块直接执行会暂存删除目录的命令。
+插件的官方远端为 `https://github.com/qualcomm/geniex-qairt-plugin.git`。main 跟随官方插件指针；feat 按其需求维护适配插件指针。发生 gitlink 冲突时，先在插件仓库检查双方 commit 的祖先关系，必要时先合并插件上游、推送并验证，再记录主仓库指针，不能直接选 main 的指针而丢掉 feat 适配。
 
-```sh
-# 以下在主仓库完成冲突处理和验证后执行；fork 是团队可写远端。
-git push fork HEAD:feat/qwen35-runtime-speed-20261014
-```
-
-`skills/` 单独占用目录，不修改自动生成或 vendored 文件来存放 skill。普通 merge 会保留上游没有更改的 skill；若上游未来加入同名路径，则需要人工合并。不要使用同步镜像、整目录替换或 reset upstream/main 来更新 feat。
-
-## 2026-10-16 同步记录
-
-- 官方主仓库基线更新到 `1f359cb7`，通过 merge 保留原有三个 Qwen3.5 分支提交。
-- 官方插件 main 仍为 `f3a3104`；适配插件 `bb28c86` 已包含该上游，因此无需制造新的插件 merge 提交。
-- Skill 及团队指南独立提交，不嵌入模型、运行库、个人工作区路径或测试设备信息。
-- 验证：skill 结构校验、全部 12 个纯 CPU 语义 demo、图清点示例与 Markdown 引用检查通过。NDK r29 / Android arm64 API28 下公共 SDK 和 benchmark 编译通过；此次关闭插件构建并复用既有 Rust model-manager 静态库，未宣称插件全量重编译。
-- 本次为源码同步。已有交付版二进制与历史速度属于原验证版本；未替换模型/交付运行库，未重跑完整模型 PPL 或吞吐。
+通用文档或 skill 的改进尽量作为独立提交进入 main，再从 main 合入 feat；若改动先发生在 feat，可仅挑选相关文档提交到 main。**不需要把整个 feat 合回 main。** 特定模型的二进制、性能结论和实现保持独立，不混入通用指导。

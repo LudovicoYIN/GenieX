@@ -1,16 +1,16 @@
-# Team guide for the Qwen3.5 adaptation branch
+# Team guide for Qualcomm LLM adaptation
 
-本文件服务于维护本分支的工程师和代码助手。先读取当前工作区状态；保留其他人的未提交改动。根据任务范围工作，不默认重做模型转换或更换已交付运行库。
+本文件服务于从 main 开发适配、或维护已有 feat 的工程师和代码助手。先读取当前工作区状态；保留其他人的未提交改动。根据任务范围工作，不默认重做模型转换或更换已交付运行库。
 
 ## 从哪里开始
 
 - `skills/qualcomm-llm-adapt/SKILL.md`：QAIRT/QNN 模型到 GenieX 的适配入口。按任务选择参考文件，不必一次读取全部资源。
-- `docs/qwen35-runtime.md`：已有版本的速度及运行条件。历史数字不是新版本的性能保证。
+- Skill 中的 `references/geniex/evidence.md`：历史案例及限制。历史数字不是新版本的性能保证；feat 中若有额外运行报告，再按任务阅读。
 - `docs/qwen35-development.md`：分支、子模块与上游同步约定。
 - `sdk/include/geniex.h`：公共 C ABI，C++ / JNI 接入应与实际运行库匹配。
 - `third-party/geniex-qairt/`：QAIRT 插件子模块；模型图执行、状态反馈和数值路径主要在这里。
 
-Skill 的模型转换部分目前只定义交付契约，不能宣称已有完整自动转换流程。此 feat 分支已包含 Qwen3.5 适配，不要重复应用 skill 中用于旧官方基线的源码补丁。
+Skill 的模型转换部分目前只定义交付契约，不能宣称已有完整自动转换流程。main 保留官方实现基线，只增加 skill 和团队指南；不要假定 main 已有 Qwen3.5 定制适配。开始适配时从 main 创建新的 feat，再按 skill 检查并移植补丁。已有适配 feat 不要重复应用旧基线补丁。
 
 ## 工作区与代码边界
 
@@ -26,7 +26,7 @@ Skill 的模型转换部分目前只定义交付契约，不能宣称已有完�
 
 `skills/` 和本指南作为自己的独立提交维护。上游未改这些路径时通常可自动保留；同路径改动仍可能冲突，逐项解决，不用整目录覆盖消除冲突。
 
-子模块冲突需要在插件仓库检查双方 ancestry，必要时先合并插件上游，再选择包含所需适配的新 commit。不要机械选择 upstream gitlink。同步后验证主仓库和插件的版本组合。
+子模块冲突需要在插件仓库检查双方 ancestry，必要时先合并插件上游，再选择包含所需适配的新 commit。不要机械选择 upstream gitlink。同步后验证主仓库和插件的版本组合。适配实现保留在 feat；通用 skill/指南可独立提交到 main，再从 main 合入 feat，不必把整个 feat 合回 main。
 
 ## 适配与验证
 
