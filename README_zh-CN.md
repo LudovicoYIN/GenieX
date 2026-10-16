@@ -28,6 +28,8 @@ GenieX 是一款**面向高通设备的端侧生成式 AI 推理运行时**。�
   <img src="docs/Mintlify-image/geniex_arch_v2.png" width="820" alt="GenieX 架构：CLI、Python、Java、Docker 以及 OpenAI 兼容的 Serve 接口构建在单一的 GenieX SDK 之上，由其分发到 llama.cpp 运行时（在 CPU / GPU / Hexagon HTP 内核上运行的 GGML）或 NPU 上的 Qualcomm AI Engine Direct 运行时——覆盖 Windows、Android 与 Linux。" />
 </div>
 
+高通大模型适配入口：[团队指南](AGENTS.md)、[main/feat 工作流程](docs/qwen35-development.md)、[适配 Skill](skills/qualcomm-llm-adapt/SKILL.md)。
+
 ## 支持的平台
 
 GenieX **仅在高通骁龙（Qualcomm Snapdragon）上运行**。找到你的平台，然后直接跳转到你想使用的接口。
