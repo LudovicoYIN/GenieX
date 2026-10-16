@@ -26,6 +26,8 @@ GenieX is an **on-device Gen AI inference runtime for Qualcomm devices**. Bring 
   <img src="docs/Mintlify-image/geniex_arch_v2.png" width="820" alt="GenieX architecture: CLI, Python, Java, Docker, and OpenAI-compatible Serve interfaces sit on a single GenieX SDK, which dispatches to the llama.cpp runtime (GGML over CPU / GPU / Hexagon HTP kernels) or the Qualcomm AI Engine Direct runtime on the NPU — across Windows, Android, and Linux." />
 </div>
 
+Qwen3.5 adaptation on this branch: [team guide](AGENTS.md), [upstream synchronization](docs/qwen35-development.md), and [adaptation skill](skills/qualcomm-llm-adapt/SKILL.md).
+
 ## Supported platforms
 
 GenieX runs **only on Qualcomm Snapdragon**. Find your platform, then jump straight to the interface you want to use.
