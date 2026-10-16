@@ -75,6 +75,7 @@ class geniex_SamplerConfig(Structure):
         ('seed', c_int32),
         ('grammar_path', c_char_p),
         ('grammar_string', c_char_p),
+        ('ignore_eos', c_bool),
     ]
 
 
@@ -167,6 +168,9 @@ class geniex_LlmGenerateInput(Structure):
         ('user_data', c_void_p),
         ('input_ids', POINTER(c_int32)),
         ('input_ids_count', c_int32),
+        ('input_embd', POINTER(c_float)),
+        ('input_embd_count', c_int32),
+        ('input_embd_dim', c_int32),
     ]
 
 
@@ -182,6 +186,7 @@ class geniex_LlmModelInfo(Structure):
         ('vocab_size', c_int32),
         ('bos_token', c_int32),
         ('add_bos', c_int32),
+        ('embd_dim', c_int32),
     ]
 
 
