@@ -1,0 +1,114 @@
+{
+  "date": "2026-10-14",
+  "board": "current USB QCS8550/Kalama",
+  "runtime": "optimized GenieX + QAIRT 2.51.40.260930",
+  "greedy": true,
+  "enable_thinking": false,
+  "max_generated_tokens": 128,
+  "reset_before_each_question": true,
+  "default_system_prompt": "You are a helpful AI assistant.",
+  "actual_prompt_tokens": [
+    37,
+    35,
+    43,
+    41,
+    42,
+    46,
+    123,
+    166
+  ],
+  "self_converted_correct_count": 5,
+  "direct_stock_normal_correct_count": 2,
+  "direct_stock_answer_hit_but_abnormal_count": 1,
+  "official_matches_geniex_output_text_for_all_questions": true,
+  "rows": [
+    {
+      "question": "请只回答数字：17乘19等于多少？",
+      "label": "17×19",
+      "expected": "323",
+      "self_converted_output": "588",
+      "self_converted_correct": false,
+      "direct_stock_output": "17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 ",
+      "direct_stock_judgment": "错误/未完成",
+      "official_output": "17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 等于 17 和 19 ",
+      "matches_official_output_text": true
+    },
+    {
+      "question": "请只回答城市名：中国的首都是哪里？",
+      "label": "中国首都",
+      "expected": "北京",
+      "self_converted_output": "北京",
+      "self_converted_correct": true,
+      "direct_stock_output": "北京",
+      "direct_stock_judgment": "正确",
+      "official_output": "北京",
+      "matches_official_output_text": true
+    },
+    {
+      "question": "甲比乙高，乙比丙高。三人中谁最高？只回答名字。",
+      "label": "甲>乙>丙，谁最高",
+      "expected": "甲",
+      "self_converted_output": "丙",
+      "self_converted_correct": false,
+      "direct_stock_output": "丙（丙比乙高）\n\n1.",
+      "direct_stock_judgment": "错误",
+      "official_output": "丙（丙比乙高）\n\n1.",
+      "matches_official_output_text": true
+    },
+    {
+      "question": "数列2、4、6、8的下一个数是什么？只回答数字。",
+      "label": "2、4、6、8下一项",
+      "expected": "10",
+      "self_converted_output": "12",
+      "self_converted_correct": false,
+      "direct_stock_output": "20202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020",
+      "direct_stock_judgment": "错误/重复",
+      "official_output": "20202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020",
+      "matches_official_output_text": true
+    },
+    {
+      "question": "苹果、香蕉、梨按顺序排列。第二项是什么？只回答水果名。",
+      "label": "苹果、香蕉、梨第二项",
+      "expected": "香蕉",
+      "self_converted_output": "香蕉",
+      "self_converted_correct": true,
+      "direct_stock_output": "香蕉是水果，不是数字。\n\n111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+      "direct_stock_judgment": "命中答案但输出异常",
+      "official_output": "香蕉是水果，不是数字。\n\n111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+      "matches_official_output_text": true
+    },
+    {
+      "question": "所有正方形都是矩形。图形A是正方形。图形A是矩形吗？只回答是或否。",
+      "label": "正方形是否为矩形",
+      "expected": "是",
+      "self_converted_output": "是",
+      "self_converted_correct": true,
+      "direct_stock_output": "是。",
+      "direct_stock_judgment": "正确",
+      "official_output": "是。",
+      "matches_official_output_text": true
+    },
+    {
+      "question": "请阅读以下项目记录并回答最后的问题。晨光项目的需求评审在九月三日完成，设计稿在九月六日定稿。开发团队在九月十日交付测试版本，测试团队随后用了四天检查登录、搜索和导出功能。产品负责人在九月十六日确认修复清单，运维团队在九月十八日完成预发布演练。会议最终决定，正式验收日期为十月十二日，地点在上海办公室。正式验收日期是几月几日？只回答日期。",
+      "label": "项目正式验收日期",
+      "expected": "十月十二日",
+      "self_converted_output": "10 月 12 日",
+      "self_converted_correct": true,
+      "direct_stock_output": "<think>\n\n</think>\n\n```\n11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+      "direct_stock_judgment": "错误/未完成",
+      "official_output": "<think>\n\n</think>\n\n```\n11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+      "matches_official_output_text": true
+    },
+    {
+      "question": "请阅读资料并只回答最后的问题。某仓库有三个区域：东区存放办公设备，西区存放包装材料，南区存放维修工具。周一上午，管理员先检查了东区的电脑和显示器，又检查了西区的纸箱和缓冲袋。周二下午，技术员在南区更换了两台设备的零件，但没有移动任何库存。周三，采购员把新到的打印纸登记在西区，随后发现登记错误，立即改到了东区。周四的盘点报告显示，所有纸箱仍在西区，维修工具仍在南区，打印纸已在东区。负责人要求以后每次盘点都保留原始记录和更正记录，避免覆盖历史。根据周四报告，打印纸最终在哪个区域？只回答区域名称。",
+      "label": "打印纸最终区域",
+      "expected": "东区",
+      "self_converted_output": "东区",
+      "self_converted_correct": true,
+      "direct_stock_output": "您提供的“三区域”“东区”“西区”“三区”“东区”“三区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东",
+      "direct_stock_judgment": "未完成/重复",
+      "official_output": "您提供的“三区域”“东区”“西区”“三区”“东区”“三区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东区”“东",
+      "matches_official_output_text": true
+    }
+  ]
+}

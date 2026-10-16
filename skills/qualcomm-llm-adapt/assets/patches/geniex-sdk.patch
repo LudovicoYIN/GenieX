@@ -1,0 +1,23 @@
+diff --git a/sdk/CMakeLists.txt b/sdk/CMakeLists.txt
+index 69400fd8..ae1c5569 100644
+--- a/sdk/CMakeLists.txt
++++ b/sdk/CMakeLists.txt
+@@ -114,6 +114,10 @@ endif()
+ # command would skip cargo whenever libgeniex_model.a happens to exist,
+ # even after the Rust sources change. cargo's own incremental check is
+ # cheap and authoritative; if nothing changed it won't touch the .a.
++if(GENIEX_PREBUILT_MODEL_MANAGER)
++    set(RUST_MODEL_LIB "${GENIEX_PREBUILT_MODEL_MANAGER}")
++    add_custom_target(model_manager_build)
++else()
+ add_custom_target(model_manager_build ALL
+     BYPRODUCTS "${RUST_MODEL_LIB}"
+     COMMAND ${CMAKE_COMMAND} -E env ${RUST_CARGO_ENV}
+@@ -123,6 +127,7 @@ add_custom_target(model_manager_build ALL
+     COMMENT "Building model manager (${RUST_PROFILE})"
+     VERBATIM
+ )
++endif()
+ 
+ enable_testing()
+ 

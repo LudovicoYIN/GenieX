@@ -1,0 +1,251 @@
+{
+  "model_id": "illustrative-fixture-not-a-model",
+  "graphs": [
+    {
+      "graph_name": "ar128_cl4096_1_of_1",
+      "inputs": [
+        {
+          "name": "input_ids",
+          "shape": [
+            1,
+            128
+          ],
+          "dtype": "QNN_DATATYPE_INT_32",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 1,
+              "offset": 0
+            }
+          }
+        },
+        {
+          "name": "attention_mask",
+          "shape": [
+            1,
+            1,
+            128,
+            4096
+          ],
+          "dtype": "QNN_DATATYPE_UFIXED_POINT_16",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 0.01,
+              "offset": -100
+            }
+          }
+        },
+        {
+          "name": "recurrent_state_k_0_in",
+          "shape": [
+            1,
+            2,
+            4,
+            4
+          ],
+          "dtype": "QNN_DATATYPE_UFIXED_POINT_16",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 0.01,
+              "offset": -100
+            }
+          }
+        },
+        {
+          "name": "conv_state_0_in",
+          "shape": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "dtype": "QNN_DATATYPE_UFIXED_POINT_16",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 0.01,
+              "offset": -100
+            }
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "logits",
+          "shape": [
+            1,
+            128,
+            32
+          ],
+          "dtype": "QNN_DATATYPE_UFIXED_POINT_16",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 0.01,
+              "offset": -100
+            }
+          }
+        },
+        {
+          "name": "recurrent_state_k_0_out",
+          "shape": [
+            1,
+            2,
+            4,
+            4
+          ],
+          "dtype": "QNN_DATATYPE_UFIXED_POINT_16",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 0.02,
+              "offset": -50
+            }
+          }
+        },
+        {
+          "name": "conv_state_0_out",
+          "shape": [
+            1,
+            2,
+            131,
+            4
+          ],
+          "dtype": "QNN_DATATYPE_UFIXED_POINT_16",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 0.01,
+              "offset": -100
+            }
+          }
+        }
+      ]
+    },
+    {
+      "graph_name": "ar1_cl4096_1_of_1",
+      "inputs": [
+        {
+          "name": "input_ids",
+          "shape": [
+            1,
+            1
+          ],
+          "dtype": "QNN_DATATYPE_INT_32",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 1,
+              "offset": 0
+            }
+          }
+        },
+        {
+          "name": "attention_mask",
+          "shape": [
+            1,
+            1,
+            1,
+            4096
+          ],
+          "dtype": "QNN_DATATYPE_UFIXED_POINT_16",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 0.01,
+              "offset": -100
+            }
+          }
+        },
+        {
+          "name": "recurrent_state_k_0_in",
+          "shape": [
+            1,
+            2,
+            4,
+            4
+          ],
+          "dtype": "QNN_DATATYPE_UFIXED_POINT_16",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 0.01,
+              "offset": -100
+            }
+          }
+        },
+        {
+          "name": "conv_state_0_in",
+          "shape": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "dtype": "QNN_DATATYPE_UFIXED_POINT_16",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 0.01,
+              "offset": -100
+            }
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "logits",
+          "shape": [
+            1,
+            1,
+            32
+          ],
+          "dtype": "QNN_DATATYPE_UFIXED_POINT_16",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 0.01,
+              "offset": -100
+            }
+          }
+        },
+        {
+          "name": "recurrent_state_k_0_out",
+          "shape": [
+            1,
+            2,
+            4,
+            4
+          ],
+          "dtype": "QNN_DATATYPE_UFIXED_POINT_16",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 0.02,
+              "offset": -50
+            }
+          }
+        },
+        {
+          "name": "conv_state_0_out",
+          "shape": [
+            1,
+            2,
+            4,
+            4
+          ],
+          "dtype": "QNN_DATATYPE_UFIXED_POINT_16",
+          "quantization": {
+            "quantizationEncoding": "QNN_QUANTIZATION_ENCODING_SCALE_OFFSET",
+            "scaleOffset": {
+              "scale": 0.01,
+              "offset": -100
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

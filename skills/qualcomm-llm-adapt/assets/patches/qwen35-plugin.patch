@@ -1,0 +1,1301 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c7a7dce..fbc8fc7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -24,7 +24,13 @@ if(GENIEX_BUILD_VLM)
+     set(GENIEXPROC_ENABLE_VISION ON CACHE BOOL "" FORCE)
+ endif()
+ set(GENIEXPROC_BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third-party/geniex-proc third-party/geniex-proc)
++if(GENIEX_PREBUILT_PROC)
++    add_library(geniex-proc SHARED IMPORTED GLOBAL)
++    set_target_properties(geniex-proc PROPERTIES IMPORTED_LOCATION "${GENIEX_PREBUILT_PROC}"
++        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third-party/geniex-proc/include;${CMAKE_CURRENT_SOURCE_DIR}/third-party/geniex-proc/third-party/xtensor/include;${CMAKE_CURRENT_SOURCE_DIR}/third-party/geniex-proc/third-party/xtl/include")
++else()
++    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third-party/geniex-proc third-party/geniex-proc)
++endif()
+ 
+ # ── Compile definitions ───────────────────────────────────────────────────────
+ set(GENIEX_COMPILE_DEFS
+diff --git a/core/include/llm/input_provider.h b/core/include/llm/input_provider.h
+index 91c5442..d7079c9 100644
+--- a/core/include/llm/input_provider.h
++++ b/core/include/llm/input_provider.h
+@@ -56,6 +56,10 @@ class GENIEX_API EmbeddingInputProvider : public InputProvider {
+     // tensor_name: name of the graph input to write (default "input_embeds").
+     explicit EmbeddingInputProvider(std::string tensor_name = "input_embeds");
+ 
++    // Uses a bundle-configured pad token for static prefill padding. A negative
++    // value preserves the default of falling back to the first EOS token.
++    EmbeddingInputProvider(std::string tensor_name, int32_t pad_token_override);
++
+     // Explicit-config variant for a table that is NOT model_cfg.embedding_path
+     // and whose width differs from spec.hidden_size — e.g. Gemma3/4's per-layer
+     // embedding stream (`per_layer_inputs`, width = num_layers * per_layer_dim).
+@@ -212,6 +216,16 @@ class GENIEX_API RoPEInputProvider : public InputProvider {
+     std::string     sin_name_;
+ };
+ 
++// Qwen3.5 concatenates two copies of the rotary_dim/2 frequency table.
++class GENIEX_API ConcatRoPEInputProvider : public InputProvider {
++   public:
++    ConcatRoPEInputProvider(size_t rotary_dim, float theta, std::string cos_name, std::string sin_name);
++    void write(Graph& g, const LLMRunContext& ctx) override;
++   private:
++    RotaryEmbedding rope_;
++    std::string cos_name_, sin_name_;
++};
++
+ // LongRoPE with dynamic scaling and per-dimension extension factors.
+ class GENIEX_API LongRoPEInputProvider : public InputProvider {
+    public:
+diff --git a/core/include/llm/llm_model.h b/core/include/llm/llm_model.h
+index 945228a..ff67f4d 100644
+--- a/core/include/llm/llm_model.h
++++ b/core/include/llm/llm_model.h
+@@ -352,6 +352,14 @@ class GENIEX_API LLMModel : public Model {
+     // for every flat bundle. Resolved by resolveKVLayout().
+     std::unordered_map<std::string, int> kv_rebase_;
+ 
++    struct RecurrentTensorPair {
++        std::string input_name;
++        std::string output_name;
++        size_t      byte_count = 0;
++        size_t      element_count = 0;
++    };
++    std::vector<std::vector<RecurrentTensorPair>> recurrent_state_pairs_;
++
+     // True when the primary KV cache is a SCATTER cache: kv_in spans the whole
+     // context length and the graph places this pass's fresh KV inside it at the
+     // column given by spec_.cache_index_name, instead of concatenating a separate
+@@ -401,6 +409,12 @@ class GENIEX_API LLMModel : public Model {
+     // KV input tensor names across all shards, taken from the resolved KV pairs.
+     std::unordered_set<std::string> buildKVInputNameSet() const;
+ 
++    // Recurrent state inputs are copied verbatim from their matching outputs
++    // and broadcast to every phase/context variant of the owning shard.
++    void updateRecurrentState(size_t shard, size_t phase, size_t cl_idx, bool mirror_prefill_phase = true);
++    void initRecurrentStateBuffers();
++    std::unordered_set<std::string> buildRecurrentStateInputNameSet() const;
++
+     // One-shot fill of every KV input buffer with the encoded-zero pattern
+     // for its dtype
+     void initKVBuffers();
+diff --git a/core/include/llm/llm_spec_loader.h b/core/include/llm/llm_spec_loader.h
+index d733ee8..7ed80d3 100644
+--- a/core/include/llm/llm_spec_loader.h
++++ b/core/include/llm/llm_spec_loader.h
+@@ -147,6 +147,8 @@ struct ParsedGenieConfig {
+     std::optional<std::string> perlayer_embedding_lut_path;
+     size_t                     perlayer_embedding_size = 0;
+     QuantizedLutSpec           perlayer_embedding_quant;
++    size_t rope_dim = 0;
++    std::string rope_freqs_type = "default";
+ };
+ 
+ // ── Parsed dialog.sampler block ──────────────────────────────────────────────
+diff --git a/core/include/llm/llm_utils.h b/core/include/llm/llm_utils.h
+index cc00bad..3e288b4 100644
+--- a/core/include/llm/llm_utils.h
++++ b/core/include/llm/llm_utils.h
+@@ -141,6 +141,7 @@ std::vector<float> get_kv_cache(size_t num_kv_heads, size_t head_dim, size_t kv_
+ // callers use this when picking the first non-special input/output of a
+ // graph as the shard's hidden-state wiring point.
+ GENIEX_API bool isKVTensor(const std::string& name);
++GENIEX_API bool isRecurrentStateTensor(const std::string& name);
+ GENIEX_API bool isSpecialTensor(const std::string& name);
+ 
+ }  // namespace geniex
+diff --git a/core/include/threadpool.h b/core/include/threadpool.h
+index 78bf7e7..1ad7938 100644
+--- a/core/include/threadpool.h
++++ b/core/include/threadpool.h
+@@ -47,6 +47,8 @@ class ThreadPool {
+ 
+     size_t size() const { return threads_.size(); }
+     bool   started() const { return !threads_.empty(); }
++    // Change idle policy under the queue mutex, returning the previous policy.
++    bool setPolling(bool enabled);
+ 
+     // Clock keeper: spin up / tear down `n_spinners` busy-wait threads pinned to
+     // `cpu_mask` (0 = no pin) that keep the CPU cluster from down-clocking.
+diff --git a/core/src/graph.cpp b/core/src/graph.cpp
+index 1f0bcf1..e831826 100644
+--- a/core/src/graph.cpp
++++ b/core/src/graph.cpp
+@@ -4,9 +4,15 @@
+ #include "graph.h"
+ 
+ #include <cmath>
++#include <cstdlib>
+ #include <cstring>
+ #include <stdexcept>
+ #include <vector>
++#include <fstream>
++#include <filesystem>
++#if defined(__aarch64__)
++#include <arm_neon.h>
++#endif
+ 
+ #include "QnnTypeMacros.hpp"
+ #include "QnnTypes.h"
+@@ -44,6 +50,24 @@ size_t argmaxRaw(const void* buf, Qnn_DataType_t dtype, size_t n) {
+         case QNN_DATATYPE_FLOAT_32:
+             return scan(static_cast<const float*>(buf));
+         case QNN_DATATYPE_UFIXED_POINT_16:
++#if defined(__aarch64__)
++            if (!std::getenv("GENIEX_SCALAR_ARGMAX")) {
++                const auto* p = static_cast<const uint16_t*>(buf);
++                uint16x8_t vmax = vdupq_n_u16(0);
++                size_t i = 0;
++                for (; i + 8 <= n; i += 8) vmax = vmaxq_u16(vmax, vld1q_u16(p + i));
++                uint16_t maximum = vmaxvq_u16(vmax);
++                for (; i < n; ++i) maximum = std::max(maximum, p[i]);
++                // A second pass preserves the scalar path's first-index tie break.
++                for (i = 0; i + 8 <= n; i += 8) {
++                    if (vmaxvq_u16(vceqq_u16(vld1q_u16(p + i), vdupq_n_u16(maximum)))) {
++                        for (size_t j = i; j < i + 8; ++j) if (p[j] == maximum) return j;
++                    }
++                }
++                for (; i < n; ++i) if (p[i] == maximum) return i;
++                return 0;
++            }
++#endif
+             return scan(static_cast<const uint16_t*>(buf));
+         case QNN_DATATYPE_UFIXED_POINT_8:
+             return scan(static_cast<const uint8_t*>(buf));
+@@ -481,6 +505,13 @@ size_t Graph::argmaxOutput(const std::string& name, size_t n, size_t elem_offset
+     const auto          dtype = QNN_TENSOR_GET_DATA_TYPE(t);
+     const size_t        elem  = outputSpec(name).elementSize();
+     const auto*         base  = static_cast<const uint8_t*>(output_buffer_ptrs_.at(name)) + elem_offset * elem;
++    // Diagnostic/runtime option: bulk-copy registered QNN memory before CPU
++    // scanning. The bytes and tie-breaking are identical to the direct path.
++    if (std::getenv("GENIEX_LOGITS_COPY")) {
++        std::vector<uint64_t> cached((n * elem + sizeof(uint64_t) - 1) / sizeof(uint64_t));
++        std::memcpy(cached.data(), base, n * elem);
++        return argmaxRaw(cached.data(), dtype, n);
++    }
+     return argmaxRaw(base, dtype, n);
+ }
+ 
+@@ -491,6 +522,17 @@ const void* Graph::inputPtr(const std::string& name) const { return input_buffer
+ const void* Graph::outputPtr(const std::string& name) const { return output_buffer_ptrs_.at(name); }
+ 
+ bool Graph::execute(std::map<std::string, std::pair<double, uint16_t>>& time_log) {
++    if (const char* root = std::getenv("GENIEX_DUMP_RAW_INPUTS")) {
++        const auto dir = std::filesystem::path(root) / name_;
++        if (!std::filesystem::exists(dir)) {
++            std::filesystem::create_directories(dir);
++            for (const auto& spec : inputSpecs()) {
++                std::ofstream out(dir / spec.name, std::ios::binary);
++                out.write(static_cast<const char*>(inputPtr(spec.name)), spec.byteCount());
++                if (!out) throw std::runtime_error("failed to dump raw input: " + spec.name);
++            }
++        }
++    }
+ #ifdef GENIEX_DEBUG
+     const char* dump_dir       = std::getenv("GENIEX_DUMP_TENSOR_IO");
+     bool        dump_this_call = false;
+diff --git a/core/src/llm/input_provider.cpp b/core/src/llm/input_provider.cpp
+index 28b32ab..32c3f88 100644
+--- a/core/src/llm/input_provider.cpp
++++ b/core/src/llm/input_provider.cpp
+@@ -29,6 +29,9 @@ bool endsWithICase(const std::string& path, const std::string& suffix) {
+ 
+ EmbeddingInputProvider::EmbeddingInputProvider(std::string tensor_name) : tensor_name_(std::move(tensor_name)) {}
+ 
++EmbeddingInputProvider::EmbeddingInputProvider(std::string tensor_name, int32_t pad_token_override)
++    : tensor_name_(std::move(tensor_name)), pad_token_override_(pad_token_override) {}
++
+ EmbeddingInputProvider::EmbeddingInputProvider(
+     std::string tensor_name, std::string table_path, size_t row_hidden_size, int32_t pad_token_override)
+     : tensor_name_(std::move(tensor_name)),
+@@ -350,6 +353,56 @@ void RoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
+     if (has_sin) g.write(sin_name_, sin_vec.data(), sin_vec.size());
+ }
+ 
++ConcatRoPEInputProvider::ConcatRoPEInputProvider(
++    size_t rotary_dim, float theta, std::string cos_name, std::string sin_name)
++    : rope_(rotary_dim, theta), cos_name_(std::move(cos_name)), sin_name_(std::move(sin_name)) {
++    if (rotary_dim == 0 || rotary_dim % 2) throw std::invalid_argument("concat RoPE requires a positive even rope-dim");
++}
++
++void ConcatRoPEInputProvider::write(Graph& g, const LLMRunContext& ctx) {
++    const bool has_cos = g.hasInput(cos_name_), has_sin = g.hasInput(sin_name_);
++    if (!has_cos && !has_sin) return;
++    const size_t half = rope_.halfDim(), width = half * 2;
++    for (const auto* name : {&cos_name_, &sin_name_}) {
++        if (g.hasInput(*name) && g.inputSpec(*name).shape.back() != width)
++            throw std::runtime_error("concat RoPE input width differs from rope-dim: " + *name);
++    }
++    const size_t rows = ropeCapacityRows(g, has_cos ? cos_name_ : sin_name_, width, ctx.curr_len);
++    auto [cos, sin] = rope_.forward(paddedPositionIds(ctx.n_past, ctx.curr_len, rows));
++    std::vector<double> full_cos(rows * width), full_sin(rows * width);
++    for (size_t row = 0; row < rows; ++row) {
++        for (size_t repeat = 0; repeat < 2; ++repeat) {
++            std::copy_n(cos.data() + row * half, half, full_cos.data() + row * width + repeat * half);
++            std::copy_n(sin.data() + row * half, half, full_sin.data() + row * width + repeat * half);
++        }
++    }
++    if (std::getenv("GENIEX_CONCAT_OFFICIAL_QUANT") && has_cos) {
++        const auto& spec = g.inputSpec(cos_name_);
++        const double scale = spec.quant_scale;
++        const double offset = spec.quant_offset;
++        auto official_write = [&](const std::string& name, const std::vector<double>& values) {
++            if (spec.dtype == QNN_DATATYPE_UFIXED_POINT_16) {
++                std::vector<uint16_t> encoded(values.size());
++                for (size_t i = 0; i < values.size(); ++i)
++                    encoded[i] = static_cast<uint16_t>(std::clamp(values[i] / scale - offset, 0.0, 65535.0));
++                g.write(name, static_cast<const void*>(encoded.data()), encoded.size() * sizeof(uint16_t));
++            } else if (spec.dtype == QNN_DATATYPE_UFIXED_POINT_8) {
++                std::vector<uint8_t> encoded(values.size());
++                for (size_t i = 0; i < values.size(); ++i)
++                    encoded[i] = static_cast<uint8_t>(std::clamp(values[i] / scale - offset, 0.0, 255.0));
++                g.write(name, static_cast<const void*>(encoded.data()), encoded.size());
++            } else {
++                g.write(name, values.data(), values.size());
++            }
++        };
++        official_write(cos_name_, full_cos);
++        if (has_sin) official_write(sin_name_, full_sin);
++        return;
++    }
++    if (has_cos) g.write(cos_name_, full_cos.data(), full_cos.size(), RoundingMode::Nearest);
++    if (has_sin) g.write(sin_name_, full_sin.data(), full_sin.size(), RoundingMode::Nearest);
++}
++
+ LongRoPEInputProvider::LongRoPEInputProvider(size_t head_dim, float theta, std::vector<float> ext_factors,
+     int max_position_embeddings, int original_max_position_embeddings, std::string cos_name, std::string sin_name)
+     : rope_(head_dim, theta, std::move(ext_factors), max_position_embeddings, original_max_position_embeddings),
+diff --git a/core/src/llm/llm_model.cpp b/core/src/llm/llm_model.cpp
+index e8a3fb1..6a46b25 100644
+--- a/core/src/llm/llm_model.cpp
++++ b/core/src/llm/llm_model.cpp
+@@ -4,7 +4,9 @@
+ #include "llm/llm_model.h"
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <cassert>
++#include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+@@ -28,6 +30,12 @@
+ 
+ namespace geniex {
+ 
++// Per-thread execution context; preserve the SDK class ABI.
++static thread_local size_t current_state_tokens_ = 0;
++static thread_local size_t recurrent_slice_index_ = 0;
++static thread_local size_t recurrent_slice_count_ = 1;
++static thread_local size_t last_prefill_phase_ = 0;
++
+ namespace {
+ // True for integer QNN dtypes. A shard's token-id input (`input_ids`) is
+ // integer; the inter-shard hidden state is always a float/quantized-float
+@@ -171,6 +179,7 @@ void LLMModel::inferSpecFromGraphs() {
+         throw std::runtime_error("inferSpecFromGraphs: shard_count and num_cl must be non-zero");
+     }
+     spec_.shards.assign(shard_count_, ShardSpec{});
++    recurrent_state_pairs_.assign(shard_count_, {});
+     if (spec_.state_blocks.empty()) spec_.state_blocks.push_back(makeKVStateBlock());
+ 
+     // Gemma3/4 second (sliding-window) KV cache: if any graph exposes swa_key_*
+@@ -197,6 +206,25 @@ void LLMModel::inferSpecFromGraphs() {
+         // Representative graph: prefill (phase 0), smallest CL, shard s.
+         const Graph& g = graph(graphIndex(0, s, 0));
+ 
++        for (const auto& t : g.outputSpecs()) {
++            if (!isRecurrentStateTensor(t.name) || t.name.size() < 4 ||
++                t.name.compare(t.name.size() - 4, 4, "_out") != 0) {
++                continue;
++            }
++            const std::string input_name = t.name.substr(0, t.name.size() - 4) + "_in";
++            if (!g.hasInput(input_name)) {
++                throw std::runtime_error("inferSpecFromGraphs: recurrent state output '" + t.name +
++                                         "' has no matching input '" + input_name + "'");
++            }
++            const TensorSpec& input = g.inputSpec(input_name);
++            if (t.name.rfind("conv_state_", 0) != 0 &&
++                (input.shape != t.shape || input.elementCount() != t.elementCount())) {
++                throw std::runtime_error("inferSpecFromGraphs: recurrent state pair '" + input_name + "' / '" +
++                                         t.name + "' has mismatched shape in graph '" + g.name() + "'");
++            }
++            recurrent_state_pairs_[s].push_back({input_name, t.name, input.byteCount(), input.elementCount()});
++        }
++
+         // Hidden size is the last dim of the inter-shard hidden-state tensor.
+         // That tensor is the shard's first non-special I/O that is a float
+         // (rank >= 2) and not the vocab-sized `logits`. Identifying it by role
+@@ -285,10 +313,45 @@ void LLMModel::inferSpecFromGraphs() {
+         }
+     }
+ 
+-    if (spec_.hidden_size == 0 || spec_.vocab_size == 0) {
++    // An integrated token-ID -> logits graph has no observable hidden-state
++    // boundary. Its hidden width is unnecessary for providers or connections:
++    // token IDs use the integer provider and there are no inter-shard links.
++    const bool integrated_token_graph = shard_count_ == 1 &&
++        isIntegerDtype(graph(graphIndex(0, 0, 0)).inputSpec(spec_.shards[0].in_state_name).dtype) &&
++        spec_.shards[0].out_state_name == "logits";
++    if ((spec_.hidden_size == 0 && !integrated_token_graph) || spec_.vocab_size == 0) {
+         throw std::runtime_error("inferSpecFromGraphs: could not determine hidden_size / vocab_size from graphs");
+     }
+ 
++    const size_t phase_count = graphCount() / (shard_count_ * num_cl_);
++    for (size_t s = 0; s < recurrent_state_pairs_.size(); ++s) {
++        for (const auto& pair : recurrent_state_pairs_[s]) {
++            const TensorSpec& base_input = graph(graphIndex(0, s, 0)).inputSpec(pair.input_name);
++            for (size_t phase = 0; phase < phase_count; ++phase) {
++                for (size_t cl = 0; cl < num_cl_; ++cl) {
++                    const Graph& variant = graph(graphIndex(phase, s, cl));
++                    if (!variant.hasInput(pair.input_name) && !variant.hasOutput(pair.output_name)) continue;
++                    if (!variant.hasInput(pair.input_name) || !variant.hasOutput(pair.output_name)) {
++                        throw std::runtime_error("inferSpecFromGraphs: graph '" + variant.name() +
++                                                 "' has an incomplete recurrent state pair '" + pair.input_name + "'");
++                    }
++                    const TensorSpec& input  = variant.inputSpec(pair.input_name);
++                    const TensorSpec& output = variant.outputSpec(pair.output_name);
++                    if (input.dtype != base_input.dtype || input.shape != base_input.shape ||
++                        input.quant_scale != base_input.quant_scale || input.quant_offset != base_input.quant_offset ||
++                        input.axis_quant != base_input.axis_quant || input.byteCount() != pair.byte_count ||
++                        input.elementCount() != pair.element_count ||
++                        (pair.input_name.rfind("conv_state_", 0) != 0 &&
++                         (output.shape != input.shape || output.elementCount() != pair.element_count))) {
++                        throw std::runtime_error("inferSpecFromGraphs: recurrent state pair '" + pair.input_name +
++                                                 "' changes shape or input encoding in graph '" + variant.name() +
++                                                 "'");
++                    }
++                }
++            }
++        }
++    }
++
+     GENIEX_LOG_DEBUG("inferSpecFromGraphs: shards={} hidden_size={} num_kv_heads={} head_dim={} vocab_size={}",
+         shard_count_,
+         spec_.hidden_size,
+@@ -299,9 +362,9 @@ void LLMModel::inferSpecFromGraphs() {
+ 
+ bool LLMModel::onInitialized() {
+     // Discover CL / AR / phase-prefix from the loaded QNN graph names. The
+-    // regex tolerates an optional alphabetic prefix (`prompt_` / `token_` on
+-    // some exports, absent on AI Hub IoT exports).
+-    static const std::regex graph_name_re(R"((?:[A-Za-z]+_)?ar(\d+)_cl(\d+)_(\d+)_of_(\d+))");
++    // regex tolerates an optional alphanumeric/underscore prefix, including
++    // model families such as `qwen3_5`, or no prefix on AI Hub IoT exports.
++    static const std::regex graph_name_re(R"((?:[A-Za-z][A-Za-z0-9_]*?_)?ar(\d+)_cl(\d+)_(\d+)_of_(\d+))");
+ 
+     struct ParsedGraph {
+         bool   ok    = false;
+@@ -525,6 +588,7 @@ bool LLMModel::onInitialized() {
+     }
+ 
+     initKVBuffers();
++    initRecurrentStateBuffers();
+ 
+     // Decode KV-overlap workers; env vars override the ModelConfig defaults.
+     unsigned n_workers = model_cfg_.n_decode_workers;
+@@ -595,26 +659,56 @@ size_t LLMModel::discoverRopeHeadDim(const char* cos_tensor_name) const {
+ void LLMModel::buildConnections() {
+     shard_hidden_state_.assign(num_cl_, {});
+     decode_shard_hidden_state_.assign(num_cl_, {});
++    const bool allow_quant_boundary = std::getenv("GENIEX_ALLOW_QUANT_BOUNDARY") != nullptr;
++
++    auto makeConnection = [&](size_t phase, size_t shard, size_t cl) {
++        const int   src_idx = static_cast<int>(graphIndex(phase, shard, cl));
++        const int   dst_idx = static_cast<int>(graphIndex(phase, shard + 1, cl));
++        const Graph& src    = graph(src_idx);
++        const Graph& dst    = graph(dst_idx);
++        auto matches = [&](const std::string& name) {
++            if (isSpecialTensor(name) || !src.hasOutput(name) || !dst.hasInput(name)) return false;
++            const TensorSpec& output = src.outputSpec(name);
++            const TensorSpec& input  = dst.inputSpec(name);
++            if (output.shape.size() < 2 || output.shape.back() != spec_.hidden_size ||
++                isIntegerDtype(output.dtype) || isIntegerDtype(input.dtype) || output.shape != input.shape ||
++                output.data_format != input.data_format) return false;
++            const bool same_encoding = output.dtype == input.dtype && output.quant_scale == input.quant_scale &&
++                output.quant_offset == input.quant_offset && output.axis_quant == input.axis_quant;
++            return same_encoding || (allow_quant_boundary && output.axis_quant.empty() && input.axis_quant.empty());
++        };
+ 
+-    for (size_t cl = 0; cl < num_cl_; ++cl) {
+-        for (size_t s = 0; s + 1 < shard_count_; ++s) {
+-            shard_hidden_state_[cl].push_back({static_cast<int>(graphIndex(0, s, cl)),
+-                spec_.shards[s].out_state_name,
+-                static_cast<int>(graphIndex(0, s + 1, cl)),
+-                spec_.shards[s + 1].in_state_name});
++        std::string boundary;
++        const std::string& hint = spec_.shards[shard].out_state_name;
++        if (matches(hint)) {
++            boundary = hint;
++        } else {
++            std::vector<std::string> candidates;
++            for (const auto& output : src.outputSpecs()) {
++                if (matches(output.name)) candidates.push_back(output.name);
++            }
++            if (candidates.size() != 1) {
++                throw std::runtime_error("buildConnections: found " + std::to_string(candidates.size()) +
++                                         " hidden-state boundaries from graph '" + src.name() + "' to '" +
++                                         dst.name() + "'");
++            }
++            boundary = candidates.front();
+         }
++        return Connection{src_idx, boundary, dst_idx, boundary};
++    };
+ 
++    for (size_t cl = 0; cl < num_cl_; ++cl) {
+         for (size_t s = 0; s + 1 < shard_count_; ++s) {
+-            decode_shard_hidden_state_[cl].push_back({static_cast<int>(graphIndex(1, s, cl)),
+-                spec_.shards[s].out_state_name,
+-                static_cast<int>(graphIndex(1, s + 1, cl)),
+-                spec_.shards[s + 1].in_state_name});
++            shard_hidden_state_[cl].push_back(makeConnection(/*phase=*/0, s, cl));
++            decode_shard_hidden_state_[cl].push_back(makeConnection(/*phase=*/1, s, cl));
+         }
+     }
+ }
+ 
+ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunContext& ctx,
+     const std::function<void(Graph&)>& extra_inputs) {
++    const bool shard_timing = std::getenv("GENIEX_SHARD_TIMING") != nullptr;
++    const auto shard_start = shard_timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+     const size_t kv_len = kvLen(phase, cl_idx);
+     const size_t gi     = graphIndex(phase, shard, cl_idx);
+     Graph&       g      = graph(gi);
+@@ -647,13 +741,32 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
+     }
+ 
+     if (g.hasInput(spec_.attention_mask_name)) {
+-        auto mask = get_attention_mask(ctx.n_past,
+-            ctx.curr_len,
+-            seq_len,
+-            kv_len,
+-            kvMaskWidth(phase, cl_idx),
+-            kvNewBase(phase, cl_idx, ctx.n_past));
+-        g.write(spec_.attention_mask_name, mask.data(), mask.size());
++        const auto& mask_spec = g.inputSpec(spec_.attention_mask_name);
++        const size_t width = kvMaskWidth(phase, cl_idx);
++        const size_t new_base = kvNewBase(phase, cl_idx, ctx.n_past);
++        auto direct_mask = [&](auto* target) {
++            using Code = std::remove_pointer_t<decltype(target)>;
++            const float values[2] = {-1e9f, 0.0f};
++            Code codes[2];
++            floatToTfN(codes, values, mask_spec.quant_offset, mask_spec.quant_scale, 2);
++            std::fill_n(target, seq_len * width, codes[0]);
++            for (size_t row = 0; row < ctx.curr_len; ++row) {
++                auto* dst = target + row * width;
++                std::fill_n(dst, std::min(ctx.n_past, kv_len), codes[1]);
++                std::fill_n(dst + new_base, row + 1, codes[1]);
++            }
++        };
++        const bool can_direct = std::getenv("GENIEX_DIRECT_QUANT_MASK") && mask_spec.axis_quant.empty() &&
++            mask_spec.elementCount() == seq_len * width && ctx.curr_len <= seq_len &&
++            new_base + ctx.curr_len <= width;
++        if (can_direct && mask_spec.dtype == QNN_DATATYPE_UFIXED_POINT_16) {
++            direct_mask(static_cast<uint16_t*>(g.inputPtr(spec_.attention_mask_name)));
++        } else if (can_direct && mask_spec.dtype == QNN_DATATYPE_UFIXED_POINT_8) {
++            direct_mask(static_cast<uint8_t*>(g.inputPtr(spec_.attention_mask_name)));
++        } else {
++            auto mask = get_attention_mask(ctx.n_past, ctx.curr_len, seq_len, kv_len, width, new_base);
++            g.write(spec_.attention_mask_name, mask.data(), mask.size());
++        }
+     }
+ 
+     // Must match the mask's new_base above -- both describe the same write cursor.
+@@ -673,11 +786,29 @@ void LLMModel::runShard(size_t shard, size_t phase, size_t cl_idx, const LLMRunC
+         provider->write(g, ctx);
+     }
+ 
++    current_state_tokens_ = ctx.curr_len;
++    if (g.hasInput("linear_attn_mask")) {
++        std::vector<float> linear_mask(seq_len, 0.0f);
++        std::fill_n(linear_mask.begin(), ctx.curr_len, 1.0f);
++        g.write("linear_attn_mask", linear_mask.data(), linear_mask.size());
++    }
++
+     // Caller-supplied inputs the provider chain does not cover (speculative RoPE / feature seed).
+     if (extra_inputs) extra_inputs(g);
+ 
++    const auto execute_start = shard_timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+     TimeLog tl;
+-    if (!g.execute(tl)) {
++    const bool executed = g.execute(tl);
++    if (shard_timing) {
++        const auto execute_end = std::chrono::steady_clock::now();
++        const auto prepare_us = std::chrono::duration_cast<std::chrono::microseconds>(
++            execute_start - shard_start).count();
++        const auto execute_us = std::chrono::duration_cast<std::chrono::microseconds>(
++            execute_end - execute_start).count();
++        GENIEX_LOG_INFO("shard timing: phase={} shard={} prepare_us={} execute_us={} n_past={}",
++            phase, shard, prepare_us, execute_us, ctx.n_past);
++    }
++    if (!executed) {
+         throw std::runtime_error("Graph execute failed: phase=" + std::to_string(phase) +
+                                  " shard=" + std::to_string(shard) + " cl_idx=" + std::to_string(cl_idx) +
+                                  " n_past=" + std::to_string(ctx.n_past));
+@@ -749,7 +880,7 @@ void LLMModel::copyKV(Graph& src_g, const std::string& src_name, bool src_is_out
+         throw std::runtime_error("copyKV: write [" + std::to_string(dst_off) + ", " + std::to_string(dst_off + n_tok) +
+                                  ") exceeds dst '" + dst_name + "' capacity " + std::to_string(dst_geo.kv_len));
+ 
+-    kv::copyTokens(dst_geo, dst_buf, src_geo, src_buf, src_off, dst_off, n_tok, kvRebaseFor(dst_name));
++    kv::copyTokens(dst_geo, dst_buf, src_geo, src_buf, src_off, dst_off, n_tok, src_is_output ? kv::deriveRebase(dst_spec, src_spec) : 0);
+ }
+ 
+ // Write cursor for this pass's fresh KV: n_past for scatter, round32(n_past)
+@@ -817,6 +948,135 @@ void LLMModel::updateKV(size_t s, size_t phase, size_t dst_off, size_t n_tok) {
+     }
+ }
+ 
++void LLMModel::updateRecurrentState(size_t shard, size_t phase, size_t cl_idx, bool mirror_prefill_phase) {
++    if (shard >= recurrent_state_pairs_.size() || recurrent_state_pairs_[shard].empty()) return;
++    const bool defer_decode = phase == 0 && std::getenv("GENIEX_DEFER_DECODE_RECURRENT_PREFILL");
++
++    const Graph& src = graph(graphIndex(phase, shard, cl_idx));
++    for (size_t pair_index = recurrent_slice_index_; pair_index < recurrent_state_pairs_[shard].size();
++         pair_index += recurrent_slice_count_) {
++        const auto& pair = recurrent_state_pairs_[shard][pair_index];
++        if (!src.hasOutput(pair.output_name)) {
++            throw std::runtime_error("updateRecurrentState: graph '" + src.name() + "' is missing output '" +
++                                     pair.output_name + "'");
++        }
++        // Recurrent-state outputs may be quantized even when their next inputs are fp16.
++        const TensorSpec& output_spec = src.outputSpec(pair.output_name);
++        const void*       output      = src.outputPtr(pair.output_name);
++        std::vector<uint8_t> conv_tail;
++        if (pair.input_name.rfind("conv_state_", 0) == 0) {
++            const auto& in = src.inputSpec(pair.input_name);
++            if (in.shape.size() != 4 || output_spec.shape.size() != 4 ||
++                in.shape[0] != output_spec.shape[0] || in.shape[1] != output_spec.shape[1] ||
++                in.shape[3] != output_spec.shape[3] || output_spec.shape[2] < in.shape[2] + current_state_tokens_ ||
++                in.dtype != output_spec.dtype || in.quant_scale != output_spec.quant_scale ||
++                in.quant_offset != output_spec.quant_offset || !in.axis_quant.empty() || !output_spec.axis_quant.empty()) {
++                throw std::runtime_error("incompatible conv-state boundary: " + pair.input_name);
++            }
++            const size_t row_bytes = in.byteCount() / (in.shape[0] * in.shape[1] * in.shape[2]);
++            const size_t plane_bytes = in.shape[2] * row_bytes;
++            const size_t out_stride = output_spec.shape[2] * row_bytes;
++            if (!std::getenv("GENIEX_CONV_TAIL_TEMP")) {
++                const size_t phase_count = graphCount() / (shard_count_ * num_cl_);
++                for (size_t dst_phase = 0; dst_phase < phase_count; ++dst_phase) {
++                    if (!mirror_prefill_phase && dst_phase == 0) continue;
++                    if (defer_decode && dst_phase == 1) continue;
++                    for (size_t dst_cl = 0; dst_cl < num_cl_; ++dst_cl) {
++                        Graph& dst = graph(graphIndex(dst_phase, shard, dst_cl));
++                        if (!dst.hasInput(pair.input_name)) continue;
++                        const auto& dst_spec = dst.inputSpec(pair.input_name);
++                        if (dst_spec.shape != in.shape || dst_spec.dtype != in.dtype ||
++                            dst_spec.quant_scale != in.quant_scale || dst_spec.quant_offset != in.quant_offset ||
++                            dst_spec.axis_quant != in.axis_quant) {
++                            throw std::runtime_error("incompatible direct conv-state feedback: " + pair.input_name);
++                        }
++                        auto* target = static_cast<uint8_t*>(dst.inputPtr(pair.input_name));
++                        for (size_t plane = 0; plane < in.shape[0] * in.shape[1]; ++plane) {
++                            std::memcpy(target + plane * plane_bytes,
++                                static_cast<const uint8_t*>(output) + plane * out_stride + current_state_tokens_ * row_bytes,
++                                plane_bytes);
++                        }
++                    }
++                }
++                continue;
++            }
++            conv_tail.resize(in.byteCount());
++            for (size_t plane = 0; plane < in.shape[0] * in.shape[1]; ++plane) {
++                std::memcpy(conv_tail.data() + plane * plane_bytes,
++                    static_cast<const uint8_t*>(output) + plane * out_stride + current_state_tokens_ * row_bytes,
++                    plane_bytes);
++            }
++            output = conv_tail.data();
++        }
++        std::vector<float> converted;
++        const size_t phase_count = graphCount() / (shard_count_ * num_cl_);
++        for (size_t dst_phase = 0; dst_phase < phase_count; ++dst_phase) {
++            if (!mirror_prefill_phase && dst_phase == 0) continue;
++            if (defer_decode && dst_phase == 1) continue;
++            for (size_t dst_cl = 0; dst_cl < num_cl_; ++dst_cl) {
++                Graph& dst = graph(graphIndex(dst_phase, shard, dst_cl));
++                if (!dst.hasInput(pair.input_name)) continue;
++                const TensorSpec& input_spec = dst.inputSpec(pair.input_name);
++                const bool same_encoding = output_spec.dtype == input_spec.dtype &&
++                    output_spec.quant_scale == input_spec.quant_scale &&
++                    output_spec.quant_offset == input_spec.quant_offset &&
++                    output_spec.axis_quant == input_spec.axis_quant;
++                if (same_encoding && (output_spec.byteCount() == input_spec.byteCount() || !conv_tail.empty())) {
++                    std::memcpy(dst.inputPtr(pair.input_name), output, input_spec.byteCount());
++                    continue;
++                }
++                if (!output_spec.axis_quant.empty() || !input_spec.axis_quant.empty()) {
++                    throw std::runtime_error("updateRecurrentState: cannot convert axis-quantized state '" +
++                                             pair.input_name + "'");
++                }
++                if (converted.empty()) {
++                    converted.resize(pair.element_count);
++                    src.read(pair.output_name, converted.data(), pair.element_count);
++                }
++                dst.write(pair.input_name, converted.data(), pair.element_count);
++            }
++        }
++    }
++}
++
++std::unordered_set<std::string> LLMModel::buildRecurrentStateInputNameSet() const {
++    std::unordered_set<std::string> names;
++    for (const auto& shard_pairs : recurrent_state_pairs_)
++        for (const auto& pair : shard_pairs) names.insert(pair.input_name);
++    return names;
++}
++
++void LLMModel::initRecurrentStateBuffers() {
++    const size_t phase_count = graphCount() / (shard_count_ * num_cl_);
++    for (size_t s = 0; s < recurrent_state_pairs_.size(); ++s) {
++        for (const auto& pair : recurrent_state_pairs_[s]) {
++            for (size_t phase = 0; phase < phase_count; ++phase) {
++                for (size_t cl = 0; cl < num_cl_; ++cl) {
++                    Graph& g = graph(graphIndex(phase, s, cl));
++                    if (!g.hasInput(pair.input_name)) continue;
++                    const auto& spec = g.inputSpec(pair.input_name);
++                    if (std::getenv("GENIEX_EXACT_STATE_ZERO") && spec.axis_quant.empty()) {
++                        if (spec.dtype == QNN_DATATYPE_UFIXED_POINT_16) {
++                            auto* ptr = static_cast<uint16_t*>(g.inputPtr(pair.input_name));
++                            std::fill_n(ptr, spec.elementCount(), static_cast<uint16_t>(
++                                std::clamp(-int64_t(spec.quant_offset), int64_t{0}, int64_t{65535})));
++                            continue;
++                        }
++                        if (spec.dtype == QNN_DATATYPE_UFIXED_POINT_8) {
++                            auto* ptr = static_cast<uint8_t*>(g.inputPtr(pair.input_name));
++                            std::fill_n(ptr, spec.elementCount(), static_cast<uint8_t>(
++                                std::clamp(-int64_t(spec.quant_offset), int64_t{0}, int64_t{255})));
++                            continue;
++                        }
++                    }
++                    std::vector<float> zeros(spec.elementCount(), 0.0f);
++                    g.write(spec.name, zeros.data(), zeros.size());
++                }
++            }
++        }
++    }
++}
++
+ // Adjusts KV cache stride in-place when switching context-length variants.
+ // All CL/phase variants share the same physical buffer, so no reallocation is needed.
+ // Expanding iterates rows backward to avoid overwriting unread data; contracting goes forward.
+@@ -1047,13 +1307,41 @@ void LLMModel::prefillChunks(
+ }
+ 
+ void LLMModel::prefillLoop(const std::vector<int32_t>& tokens, const PrefillHooks& hooks, size_t* last_chunk_size_out) {
++    last_prefill_phase_ = 0;
++    struct IdlePolicyGuard {
++        ThreadPool* pool;
++        bool previous;
++        ~IdlePolicyGuard() { if (pool) pool->setPolling(previous); }
++    };
++    ThreadPool* quiet_pool = std::getenv("GENIEX_PREFILL_SLEEP_WORKERS") ? decode_pool_.get() : nullptr;
++    IdlePolicyGuard idle_policy{quiet_pool, quiet_pool ? quiet_pool->setPolling(false) : false};
+     size_t       tokens_processed = 0;
+     const size_t total_tokens     = tokens.size();
++    const bool   prefill_timing    = std::getenv("GENIEX_PREFILL_TIMING") != nullptr;
++    using PrefillClock = std::chrono::steady_clock;
++    const auto prefill_start = prefill_timing ? PrefillClock::now() : PrefillClock::time_point{};
++    std::vector<uint64_t> shard_us(shard_count_, 0);
++    uint64_t recurrent_us = 0, kv_us = 0, connections_us = 0;
++    size_t chunks = 0;
++    auto timed = [&](auto&& operation, uint64_t& total) {
++        if (!prefill_timing) {
++            operation();
++            return;
++        }
++        const auto start = PrefillClock::now();
++        operation();
++        total += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
++            PrefillClock::now() - start).count());
++    };
+ 
+     while (tokens_processed < total_tokens) {
+         const size_t remaining      = total_tokens - tokens_processed;
+         const size_t chunk_size     = std::min(remaining, spec_.seq_len_prefill);
+         const bool   is_final_chunk = (tokens_processed + chunk_size >= total_tokens);
++        const bool ar1_tail = std::getenv("GENIEX_AR1_PREFILL_TAIL") && is_final_chunk && chunk_size == 1 &&
++            n_past_ > 0 && spec_.seq_len_decode == 1 && graphCount() > shard_count_ * num_cl_ &&
++            !hooks.run_lm_head_every_chunk && !hooks.write_shard_inputs;
++        const size_t phase = ar1_tail ? 1 : 0;
+         if (last_chunk_size_out) *last_chunk_size_out = chunk_size;
+ 
+         // Ensure the prefill KV buffer (CL - seq_len_prefill) can hold n_past + chunk_size after this chunk.
+@@ -1067,7 +1355,27 @@ void LLMModel::prefillLoop(const std::vector<int32_t>& tokens, const PrefillHook
+             tokens_processed + chunk_size,
+             active_cl_idx_,
+             is_final_chunk);
+-        const LLMRunContext ctx{chunk, n_past_, chunk_size, /*phase=*/0};
++        if (ar1_tail) {
++            // Official Genie selects AR1 for a one-token tail after wide prefill.
++            // Bring the deferred decode state up to date before switching stride.
++            for (size_t s = 0; s < shard_count_; ++s) {
++                Graph& src = graph(graphIndex(0, s, active_cl_idx_));
++                for (size_t cl = 0; cl < num_cl_; ++cl) {
++                    Graph& dst = graph(graphIndex(1, s, cl));
++                    for (const auto& pair : recurrent_state_pairs_[s]) {
++                        const auto& a = src.inputSpec(pair.input_name);
++                        const auto& b = dst.inputSpec(pair.input_name);
++                        if (a.shape != b.shape || a.dtype != b.dtype || a.quant_scale != b.quant_scale ||
++                            a.quant_offset != b.quant_offset || a.axis_quant != b.axis_quant)
++                            throw std::runtime_error("incompatible AR1 prefill-tail state: " + pair.input_name);
++                        std::memcpy(dst.inputPtr(pair.input_name), src.inputPtr(pair.input_name), a.byteCount());
++                    }
++                }
++                reshapeKV(s, kvLen(0, active_cl_idx_), kvLen(1, active_cl_idx_), n_past_);
++            }
++            last_prefill_phase_ = 1;
++        }
++        const LLMRunContext ctx{chunk, n_past_, chunk_size, phase};
+ 
+         // Non-final chunks only need the KV cache populated, so the LM-head-only shard can be
+         // skipped -- unless a hook needs its output (e.g. per-chunk logits) on every chunk.
+@@ -1087,21 +1395,56 @@ void LLMModel::prefillLoop(const std::vector<int32_t>& tokens, const PrefillHook
+                 GENIEX_LOG_DEBUG("skipping LM-head-only shard {} on non-final prefill chunk", s);
+                 continue;
+             }
+-            runShard(s, /*phase=*/0, active_cl_idx_, ctx, extra_inputs);
+-            updateKV(s, /*phase=*/0, n_past_, chunk_size);
++            timed([&] { runShard(s, phase, active_cl_idx_, ctx, extra_inputs); }, shard_us[s]);
++            timed([&] { updateRecurrentState(s, phase, active_cl_idx_); }, recurrent_us);
++            timed([&] { updateKV(s, phase, n_past_, chunk_size); }, kv_us);
+             if (s + 1 < shard_count_) {
+                 if (!run_lm_head && spec_.shards[s + 1].lm_head_only) {
+                     continue;
+                 }
+-                applyConnections({shard_hidden_state_[active_cl_idx_][s]});
++                const auto& connections = ar1_tail ? decode_shard_hidden_state_ : shard_hidden_state_;
++                timed([&] { applyConnections({connections[active_cl_idx_][s]}); }, connections_us);
+             }
+         }
++        if (ar1_tail) {
++            for (size_t s = 0; s < shard_count_; ++s)
++                reshapeKV(s, kvLen(1, active_cl_idx_), kvLen(0, active_cl_idx_), n_past_ + chunk_size);
++        }
+ 
+         if (hooks.on_chunk_done) hooks.on_chunk_done(chunk_size);
+ 
+         token_history_.insert(token_history_.end(), chunk.begin(), chunk.end());
+         n_past_ += chunk_size;
+         tokens_processed += chunk_size;
++        ++chunks;
++    }
++
++    if (std::getenv("GENIEX_DEFER_DECODE_RECURRENT_PREFILL") && total_tokens &&
++        graphCount() > shard_count_ * num_cl_) {
++        timed([&] {
++            for (size_t s = 0; s < shard_count_; ++s) {
++                Graph& src = graph(graphIndex(0, s, active_cl_idx_));
++                for (size_t cl = 0; cl < num_cl_; ++cl) {
++                    Graph& dst = graph(graphIndex(1, s, cl));
++                    for (const auto& pair : recurrent_state_pairs_[s]) {
++                        const auto& a = src.inputSpec(pair.input_name);
++                        const auto& b = dst.inputSpec(pair.input_name);
++                        if (a.shape != b.shape || a.dtype != b.dtype || a.quant_scale != b.quant_scale ||
++                            a.quant_offset != b.quant_offset || a.axis_quant != b.axis_quant)
++                            throw std::runtime_error("incompatible final prefill state sync: " + pair.input_name);
++                        std::memcpy(dst.inputPtr(pair.input_name), src.inputPtr(pair.input_name), a.byteCount());
++                    }
++                }
++            }
++        }, recurrent_us);
++    }
++    if (prefill_timing) {
++        for (size_t s = 0; s < shard_count_; ++s)
++            GENIEX_LOG_INFO("prefill timing: shard={} us={} chunks={}", s, shard_us[s], chunks);
++        const auto total_us = std::chrono::duration_cast<std::chrono::microseconds>(
++            PrefillClock::now() - prefill_start).count();
++        GENIEX_LOG_INFO("prefill timing: total_us={} recurrent_us={} kv_us={} connections_us={} tokens={} chunks={}",
++            total_us, recurrent_us, kv_us, connections_us, total_tokens, chunks);
+     }
+ }
+ 
+@@ -1162,17 +1505,38 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
+         }
+     }
+ 
+-    prefillChunks(prompt_tokens, &last_chunk_size);
++    const char* ar1_prefill_env = std::getenv("GENIEX_QAIRT_PREFILL_AR1");
++    const bool  use_ar1_prefill = ar1_prefill_env && ar1_prefill_env[0] == '1';
++    if (use_ar1_prefill) {
++        promoteCL(n_past_ + total_tokens, /*capacity_phase=*/1, /*stride_phase=*/0);
++        for (size_t s = 0; s < shard_count_; ++s)
++            reshapeKV(s, kvLen(/*phase=*/0, active_cl_idx_), kvLen(/*phase=*/1, active_cl_idx_), n_past_);
+ 
+-    // Switch KV stride from prefill to decode before entering the decode loop.
+-    {
++        for (int32_t token : prompt_tokens) {
++            const std::vector<int32_t> token_ids{token};
++            const LLMRunContext        ctx{token_ids, n_past_, /*curr_len=*/1, /*phase=*/1};
++            for (size_t s = 0; s < shard_count_; ++s) {
++                runShard(s, /*phase=*/1, active_cl_idx_, ctx);
++                updateRecurrentState(s, /*phase=*/1, active_cl_idx_);
++                updateKV(s, /*phase=*/1, n_past_, /*n_tok=*/1);
++                if (s + 1 < shard_count_)
++                    applyConnections({decode_shard_hidden_state_[active_cl_idx_][s]});
++            }
++            token_history_.push_back(token);
++            ++n_past_;
++        }
++        GENIEX_LOG_INFO("generate: prompt prefilled one token at a time with AR1 graphs");
++    } else {
++        prefillChunks(prompt_tokens, &last_chunk_size);
++
++        // Switch KV stride from prefill to decode before entering the decode loop.
+         for (size_t s = 0; s < shard_count_; ++s)
+             reshapeKV(s, kvLen(/*phase=*/0, active_cl_idx_), kvLen(/*phase=*/1, active_cl_idx_), n_past_);
+     }
+ 
+-    // Prefill output is [seq_len, vocab_size]; the last valid token is at last_chunk_size - 1.
+-    const size_t         last_chunk_offset = last_chunk_size - 1;
+-    int32_t              next_token        = sampleNextToken(/*phase=*/0, last_chunk_offset);
++    // The AR1 path leaves logits in the decode graph; AR128 prefill leaves the last prompt row in prefill.
++    const size_t last_chunk_offset = use_ar1_prefill ? 0 : last_chunk_size - 1;
++    int32_t      next_token        = sampleNextToken(use_ar1_prefill ? 1 : last_prefill_phase_, last_chunk_offset);
+     std::vector<int32_t> output_tokens;
+ 
+     GENIEX_LOG_DEBUG("prefill done: n_past={}, first_token={}", n_past_, next_token);
+@@ -1180,6 +1544,43 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
+     // Keep the CPU cluster from down-clocking across the decode loop.
+     startClockKeeper();
+ 
++    const bool decode_timing = std::getenv("GENIEX_DECODE_TIMING") != nullptr;
++    const char* defer_env = std::getenv("GENIEX_DEFER_PREFILL_RECURRENT");
++    const bool defer_prefill_recurrent = defer_env && defer_env[0] == '1';
++    using DecodeClock = std::chrono::steady_clock;
++    auto micros = [](DecodeClock::time_point start) {
++        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
++            DecodeClock::now() - start).count());
++    };
++    std::vector<uint64_t> shard_us(shard_count_, 0);
++    uint64_t recurrent_us = 0, connections_us = 0, sample_us = 0, wait_us = 0, serial_kv_us = 0;
++    std::atomic<uint64_t> worker_kv_us{0};
++    std::atomic<uint64_t> worker_recurrent_us{0};
++    const char* recurrent_workers_env = std::getenv("GENIEX_RECURRENT_WORKERS");
++    const size_t recurrent_workers = decode_pool_ && recurrent_workers_env
++        ? std::clamp(std::atoi(recurrent_workers_env), 1, 3) : 0;
++    size_t timed_steps = 0;
++    const auto decode_start = DecodeClock::now();
++    auto timed = [&](auto&& operation, uint64_t& total) {
++        if (!decode_timing) {
++            operation();
++            return;
++        }
++        const auto start = DecodeClock::now();
++        operation();
++        total += micros(start);
++    };
++    // Jobs capture timing counters from this frame. Drain before those counters
++    // and caller-visible buffers can be unwound by a callback/execute exception.
++    struct DecodeDrainGuard {
++        ThreadPool* pool;
++        ~DecodeDrainGuard() {
++            if (pool) {
++                try { pool->wait(); } catch (...) { /* Preserve the original exception. */ }
++            }
++        }
++    } decode_drain{decode_pool_.get()};
++
+     for (int step = 0; step < gen_cfg.max_tokens; ++step) {
+         if (isEndOfGeneration(next_token, gen_cfg)) break;
+         output_tokens.push_back(next_token);
+@@ -1191,7 +1592,7 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
+         // KV write-back from the previous step must finish before restriding, evicting, or
+         // re-reading the KV buffers below.
+         if (decode_pool_) {
+-            decode_pool_->wait();
++            timed([&] { decode_pool_->wait(); }, wait_us);
+         }
+ 
+         // Stop and report when the next decode step would exceed the largest available CL.
+@@ -1212,26 +1613,102 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
+ 
+         const size_t kv_dst_off = n_past_;  // n_past_ advances before the jobs run
+         for (size_t s = 0; s < shard_count_; ++s) {
+-            runShard(s, /*phase=*/1, active_cl_idx_, ctx);
++            timed([&] { runShard(s, /*phase=*/1, active_cl_idx_, ctx); }, shard_us[s]);
+             // updateKV(s) feeds nothing in shard s+1's execute, so overlap it with the
+             // next runShard; the top-of-step wait() orders it before the next read.
+             if (decode_pool_) {
+-                decode_pool_->enqueue([this, s, kv_dst_off] { updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1); });
++                decode_pool_->enqueue([this, s, kv_dst_off, decode_timing, &worker_kv_us, &micros] {
++                    const auto start = DecodeClock::now();
++                    updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1);
++                    if (decode_timing) worker_kv_us.fetch_add(micros(start), std::memory_order_relaxed);
++                });
++            } else {
++                timed([&] { updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1); }, serial_kv_us);
++            }
++            // KV output and recurrent output are disjoint: start the KV worker
++            // before synchronous recurrent feedback to hide its work under the copy.
++            if (recurrent_workers) {
++                const size_t state_cl = active_cl_idx_;
++                for (size_t slice = 0; slice < recurrent_workers; ++slice) {
++                    decode_pool_->enqueue([this, s, slice, recurrent_workers, state_cl, defer_prefill_recurrent,
++                                           decode_timing, &worker_recurrent_us, &micros] {
++                        const auto start = DecodeClock::now();
++                        struct SliceGuard {
++                            size_t tokens = current_state_tokens_;
++                            size_t index = recurrent_slice_index_;
++                            size_t count = recurrent_slice_count_;
++                            ~SliceGuard() {
++                                current_state_tokens_ = tokens;
++                                recurrent_slice_index_ = index;
++                                recurrent_slice_count_ = count;
++                            }
++                        } slice_guard;
++                        current_state_tokens_ = 1;
++                        recurrent_slice_index_ = slice;
++                        recurrent_slice_count_ = recurrent_workers;
++                        updateRecurrentState(s, /*phase=*/1, state_cl, !defer_prefill_recurrent);
++                        if (decode_timing) worker_recurrent_us.fetch_add(micros(start), std::memory_order_relaxed);
++                    });
++                }
+             } else {
+-                updateKV(s, /*phase=*/1, kv_dst_off, /*n_tok=*/1);
++                timed([&] {
++                    updateRecurrentState(s, /*phase=*/1, active_cl_idx_, !defer_prefill_recurrent);
++                }, recurrent_us);
+             }
+             if (s + 1 < shard_count_) {
+-                applyConnections({decode_shard_hidden_state_[active_cl_idx_][s]});
++                timed([&] { applyConnections({decode_shard_hidden_state_[active_cl_idx_][s]}); }, connections_us);
+             }
+         }
+ 
+         n_past_++;
+         token_history_.push_back(next_token);
+-        next_token = sampleNextToken(/*phase=*/1, /*token_offset=*/0);
++        timed([&] { next_token = sampleNextToken(/*phase=*/1, /*token_offset=*/0); }, sample_us);
++        ++timed_steps;
+     }
+ 
+     // Drain KV jobs still in flight after an early break (EOS / callback stop).
+-    if (decode_pool_) decode_pool_->wait();
++    if (decode_pool_) timed([&] { decode_pool_->wait(); }, wait_us);
++
++    uint64_t recurrent_sync_us = 0;
++    if (defer_prefill_recurrent && timed_steps > 0) {
++        timed([&] {
++            for (size_t s = 0; s < shard_count_; ++s) {
++                for (size_t cl = 0; cl < num_cl_; ++cl) {
++                    Graph& decode_graph = graph(graphIndex(/*phase=*/1, s, cl));
++                    Graph& prefill_graph = graph(graphIndex(/*phase=*/0, s, cl));
++                    for (const auto& pair : recurrent_state_pairs_[s]) {
++                        if (!decode_graph.hasInput(pair.input_name) || !prefill_graph.hasInput(pair.input_name))
++                            continue;
++                        const auto& src = decode_graph.inputSpec(pair.input_name);
++                        const auto& dst = prefill_graph.inputSpec(pair.input_name);
++                        if (src.byteCount() != dst.byteCount() || src.dtype != dst.dtype ||
++                            src.quant_scale != dst.quant_scale || src.quant_offset != dst.quant_offset ||
++                            src.axis_quant != dst.axis_quant) {
++                            throw std::runtime_error("deferred recurrent sync: incompatible input encoding for '" +
++                                                     pair.input_name + "'");
++                        }
++                        std::memcpy(prefill_graph.inputPtr(pair.input_name),
++                                    decode_graph.inputPtr(pair.input_name), src.byteCount());
++                    }
++                }
++            }
++        }, recurrent_sync_us);
++    }
++
++    if (decode_timing) {
++        GENIEX_LOG_INFO("decode recurrent workers: count={} sum_us={} steps={}", recurrent_workers,
++                        worker_recurrent_us.load(std::memory_order_relaxed), timed_steps);
++        const auto total_us = micros(decode_start);
++        uint64_t shard_total_us = 0;
++        for (size_t s = 0; s < shard_count_; ++s) {
++            shard_total_us += shard_us[s];
++            GENIEX_LOG_INFO("decode timing: shard={} us={} steps={}", s, shard_us[s], timed_steps);
++        }
++        GENIEX_LOG_INFO("decode timing: total_us={} graph_us={} recurrent_us={} connections_us={} "
++                        "sample_us={} wait_us={} serial_kv_us={} worker_kv_us={} recurrent_sync_us={} steps={}",
++            total_us, shard_total_us, recurrent_us, connections_us, sample_us, wait_us,
++            serial_kv_us, worker_kv_us.load(std::memory_order_relaxed), recurrent_sync_us, timed_steps);
++    }
+ 
+     // Decode window is over; release the cluster back to the governor.
+     stopClockKeeper();
+@@ -1245,6 +1722,13 @@ std::vector<int32_t> LLMModel::generate(const std::vector<int32_t>& prompt_token
+     }
+ 
+     GENIEX_LOG_DEBUG("generate done: {} output tokens", output_tokens.size());
++    if (const char* prefix = std::getenv("GENIEX_OUTPUT_TOKEN_IDS_PREFIX")) {
++        static thread_local size_t token_dump_index = 0;
++        std::ofstream out(std::string(prefix) + std::to_string(token_dump_index++) + ".txt");
++        for (int32_t token : output_tokens) out << token << ' ';
++        out << '\n';
++        if (!out) throw std::runtime_error("failed to save generated token IDs");
++    }
+     return output_tokens;
+ }
+ 
+@@ -1315,6 +1799,13 @@ std::vector<float> LLMModel::forwardLogits(const std::vector<int32_t>& tokens, b
+ }
+ 
+ int32_t LLMModel::sampleNextToken(size_t phase, size_t token_offset) {
++    // The official Genie greedy path reads the encoded logits and takes argmax.
++    // Graph::argmaxOutput already implements dtype-aware argmax without a float copy.
++    if (!sampler_) {
++        const Graph& g = graph(graphIndex(phase, shard_count_ - 1, active_cl_idx_));
++        return static_cast<int32_t>(g.argmaxOutput(spec_.shards.back().out_state_name,
++            spec_.vocab_size, token_offset * spec_.vocab_size));
++    }
+     std::vector<float> logits;
+     readLastLogits(phase, token_offset, logits);
+ 
+@@ -1352,8 +1843,12 @@ bool samplerCfgEqual(const GenerationConfig& a, const GenerationConfig& b) {
+ }  // namespace
+ 
+ void LLMModel::prepareSampler(const GenerationConfig& gen_cfg, const std::vector<int32_t>& prompt_tokens) {
+-    // Sampling off → drop any cached sampler so sampleNextToken() goes greedy.
+-    if (!gen_cfg.enable_sampling) {
++    // Unconstrained greedy decoding needs neither top-k/top-p nor the probability
++    // distribution chain. Keep grammar and penalty configurations on the chain.
++    const bool plain_greedy = gen_cfg.temperature <= 0.0f && gen_cfg.grammar_str.empty() &&
++        gen_cfg.repetition_penalty == 1.0f && gen_cfg.presence_penalty == 0.0f &&
++        gen_cfg.frequency_penalty == 0.0f && !std::getenv("GENIEX_GREEDY_SAMPLER_CHAIN");
++    if (!gen_cfg.enable_sampling || plain_greedy) {
+         sampler_.reset();
+         sampler_cfg_valid_ = false;
+         return;
+@@ -1480,7 +1975,7 @@ void LLMModel::resolveKVLayout() {
+ 
+                     const int rebase = kv::deriveRebase(key_in, key_out);
+                     for (const auto* name : {&p.key_in, &p.value_in}) {
+-                        const auto [it, inserted] = kv_rebase_.emplace(*name, rebase);
++                        const auto [it, inserted] = kv_rebase_.emplace(g.name() + "/" + *name, rebase);
+                         if (!inserted && it->second != rebase) {
+                             throw std::runtime_error("LLMModel: KV tensor '" + *name +
+                                                      "' needs conflicting rebases across graph variants (" +
+@@ -1539,6 +2034,7 @@ void LLMModel::resetKVCache() {
+     sampler_cfg_valid_ = false;
+ 
+     initKVBuffers();
++    initRecurrentStateBuffers();
+ }
+ 
+ void LLMModel::initKVBuffers() {
+@@ -1574,11 +2070,12 @@ void LLMModel::saveKVCacheToFile(const std::string& path) const {
+     }
+ 
+     const auto   kv_names       = buildKVInputNameSet();
++    const auto   recurrent_names = buildRecurrentStateInputNameSet();
+     const size_t prefill_graphs = shard_count_ * num_cl_;
+     for (size_t gi = 0; gi < prefill_graphs; ++gi) {
+         const Graph& g = graph(gi);
+         for (const auto& spec : g.inputSpecs()) {
+-            if (kv_names.count(spec.name)) {
++            if (kv_names.count(spec.name) || recurrent_names.count(spec.name)) {
+                 // KV state lives in the graph's INPUT buffer; read it raw.
+                 // (Graph::read targets output tensors, not inputs.)
+                 const void* buf = g.inputPtr(spec.name);
+@@ -1606,17 +2103,34 @@ void LLMModel::loadKVCacheFromFile(const std::string& path) {
+     }
+ 
+     const auto   kv_names       = buildKVInputNameSet();
++    const auto   recurrent_names = buildRecurrentStateInputNameSet();
+     const size_t prefill_graphs = shard_count_ * num_cl_;
+     for (size_t gi = 0; gi < prefill_graphs; ++gi) {
+         Graph& g = graph(gi);
+         for (const auto& spec : g.inputSpecs()) {
+-            if (kv_names.count(spec.name)) {
++            if (kv_names.count(spec.name) || recurrent_names.count(spec.name)) {
+                 std::vector<uint8_t> buf(spec.byteCount());
+                 f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+                 g.write(spec.name, buf.data(), buf.size());
+             }
+         }
+     }
++    if (!recurrent_names.empty()) {
++        const size_t phase_count = graphCount() / (shard_count_ * num_cl_);
++        for (size_t s = 0; s < shard_count_; ++s) {
++            const Graph& source = graph(graphIndex(0, s, 0));
++            for (const auto& pair : recurrent_state_pairs_[s]) {
++                const void* state = source.inputPtr(pair.input_name);
++                for (size_t phase = 0; phase < phase_count; ++phase) {
++                    for (size_t cl = 0; cl < num_cl_; ++cl) {
++                        Graph& dst = graph(graphIndex(phase, s, cl));
++                        if (dst.hasInput(pair.input_name))
++                            std::memcpy(dst.inputPtr(pair.input_name), state, pair.byte_count);
++                    }
++                }
++            }
++        }
++    }
+     if (!f) throw std::runtime_error("loadKVCacheFromFile: read error");
+ }
+ 
+diff --git a/core/src/llm/llm_spec_loader.cpp b/core/src/llm/llm_spec_loader.cpp
+index 9f58763..2e1109c 100644
+--- a/core/src/llm/llm_spec_loader.cpp
++++ b/core/src/llm/llm_spec_loader.cpp
+@@ -44,7 +44,7 @@ struct GraphNameParts {
+ };
+ 
+ bool parseGraphName(const std::string& name, GraphNameParts& out) {
+-    static const std::regex re(R"((?:([a-zA-Z]+)_)?ar(\d+)_cl(\d+)_(\d+)_of_(\d+))");
++    static const std::regex re(R"((?:([a-zA-Z][a-zA-Z0-9_]*?)_)?ar(\d+)_cl(\d+)_(\d+)_of_(\d+))");
+     std::smatch             m;
+     if (!std::regex_match(name, m, re)) return false;
+     out.phase_prefix = m[1].matched ? m[1].str() : "";
+@@ -391,6 +391,8 @@ ParsedGenieConfig parseGenieConfig(const std::filesystem::path& bundle_dir) {
+                 engine.at("model").at("positional-encoding").is_object()) {
+                 const auto& pe = engine.at("model").at("positional-encoding");
+                 out.rope_theta = pe.value("rope-theta", 10000.0f);
++                out.rope_dim = pe.value("rope-dim", size_t{0});
++                out.rope_freqs_type = pe.value("rope-freqs-type", std::string{"default"});
+                 if (pe.contains("rope-scaling") && pe.at("rope-scaling").is_object()) {
+                     out.rope_scaling = parseRopeScaling(pe.at("rope-scaling"));
+                 }
+@@ -481,6 +483,13 @@ LLMSpec buildSpecSkeleton(const ParsedGenieConfig& gc) {
+ // ─────────────────────────────────────────────────────────────────────────────
+ std::unique_ptr<InputProvider> makeRoPEProvider(
+     size_t head_dim, const ParsedGenieConfig& gc, std::string cos_name, std::string sin_name) {
++    if (gc.rope_freqs_type == "concat") {
++        if (!std::holds_alternative<StandardRope>(gc.rope_scaling))
++            throw std::runtime_error("concat RoPE with scaling is not supported");
++        const size_t dim = gc.rope_dim ? gc.rope_dim : head_dim / 2;
++        GENIEX_LOG_INFO("llm: concat RoPE provider (rope-dim={})", dim);
++        return std::make_unique<ConcatRoPEInputProvider>(dim, gc.rope_theta, cos_name, sin_name);
++    }
+     return std::visit(
+         [&](const auto& s) -> std::unique_ptr<InputProvider> {
+             using T = std::decay_t<decltype(s)>;
+@@ -538,8 +547,12 @@ std::unique_ptr<InputProvider> makeEmbeddingProvider(
+         if (pad < 0) pad = gc.eos_token_ids.empty() ? 0 : gc.eos_token_ids.front();
+         return std::make_unique<TokenIdInputProvider>("input_ids", pad);
+     }
+-    if (first_shard_input == "input_embeds" || first_shard_input == "inputs_embeds") {
+-        auto p = std::make_unique<EmbeddingInputProvider>(first_shard_input);
++    const bool external_embedding = gc.embedding_lut_path && !gc.embedding_lut_path->empty();
++    if (first_shard_input == "input_embeds" || first_shard_input == "inputs_embeds" || external_embedding) {
++        if (external_embedding && first_shard_input != "input_embeds" && first_shard_input != "inputs_embeds") {
++            GENIEX_LOG_INFO("llm_spec_loader: binding external embedding LUT to graph input '{}'", first_shard_input);
++        }
++        auto p = std::make_unique<EmbeddingInputProvider>(first_shard_input, gc.pad_token_id);
+         // Quantized main LUT (Gemma4 and other large-vocab bundles): mmap +
+         // per-row conversion instead of a dequantized in-RAM table.
+         if (gc.embedding_quant.quantized()) p->setQuantization(gc.embedding_quant);
+diff --git a/core/src/llm/llm_utils.cpp b/core/src/llm/llm_utils.cpp
+index 5d06b2e..1859460 100644
+--- a/core/src/llm/llm_utils.cpp
++++ b/core/src/llm/llm_utils.cpp
+@@ -19,11 +19,21 @@ bool isKVTensor(const std::string& s) {
+     return has_inout_suffix && (s.find("key") != std::string::npos || s.find("value") != std::string::npos);
+ }
+ 
++bool isRecurrentStateTensor(const std::string& name) {
++    constexpr const char* prefix = "recurrent_state_";
++    if (name.rfind(prefix, 0) != 0 && name.rfind("conv_state_", 0) != 0) return false;
++    return (name.size() >= 3 && name.compare(name.size() - 3, 3, "_in") == 0) ||
++           (name.size() >= 4 && name.compare(name.size() - 4, 4, "_out") == 0);
++}
++
+ bool isSpecialTensor(const std::string& name) {
+     // Named non-hidden-state tensors that currently appear in shipped bundles.
+     // Add more as new bundles introduce them.
+     static const std::unordered_set<std::string> kNamed = {
+         "attention_mask",
++        "cache_index",
++        "linear_attn_mask",
++        "conv_states_insert_index",
+         "position_ids",
+         "position_ids_cos",
+         "position_ids_sin",
+@@ -44,7 +54,7 @@ bool isSpecialTensor(const std::string& name) {
+     // state). Treat like a special input so shard-0's hidden-state detection
+     // still picks inputs_embeds.
+     if (name == "per_layer_inputs") return true;
+-    return kNamed.count(name) > 0 || isKVTensor(name);
++    return kNamed.count(name) > 0 || isKVTensor(name) || isRecurrentStateTensor(name);
+ }
+ 
+ RotaryEmbedding::RotaryEmbedding(size_t head_dim, float theta) : half_dim_(head_dim / 2) {
+diff --git a/core/src/model.cpp b/core/src/model.cpp
+index 8046166..5e70f49 100644
+--- a/core/src/model.cpp
++++ b/core/src/model.cpp
+@@ -31,8 +31,16 @@ void Model::applyConnections(const std::vector<Connection>& connections) {
+             void*       dst = graphs_[conn.dst_graph_idx].inputPtr(conn.dst_tensor_name);
+ 
+             if (src == dst) continue;  // shared buffer — no copy needed
+-            const auto& spec = graphs_[conn.src_graph_idx].outputSpec(conn.src_tensor_name);
+-            graphs_[conn.dst_graph_idx].write(conn.dst_tensor_name, src, spec.byteCount());
++            const auto& output = graphs_[conn.src_graph_idx].outputSpec(conn.src_tensor_name);
++            const auto& input = graphs_[conn.dst_graph_idx].inputSpec(conn.dst_tensor_name);
++            if (output.dtype == input.dtype && output.quant_scale == input.quant_scale &&
++                output.quant_offset == input.quant_offset && output.axis_quant == input.axis_quant) {
++                graphs_[conn.dst_graph_idx].write(conn.dst_tensor_name, src, output.byteCount());
++            } else {
++                std::vector<float> values(output.elementCount());
++                graphs_[conn.src_graph_idx].read(conn.src_tensor_name, values.data(), values.size());
++                graphs_[conn.dst_graph_idx].write(conn.dst_tensor_name, values.data(), values.size());
++            }
+         } catch (const std::exception& e) {
+             throw std::runtime_error("applyConnections failed: graph[" + std::to_string(conn.src_graph_idx) + "]." +
+                                      conn.src_tensor_name + " -> graph[" + std::to_string(conn.dst_graph_idx) + "]." +
+diff --git a/core/src/model_init.cpp b/core/src/model_init.cpp
+index 33b6550..0b44501 100644
+--- a/core/src/model_init.cpp
++++ b/core/src/model_init.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include <cstdarg>
+ #include <cstring>
++#include <cstdlib>
+ 
+ #include "QnnConfig.hpp"
+ #include "llm/llm_spec_loader.h"  // parseHtpCoreCount, resolveHtpPerfConfig
+@@ -170,7 +171,7 @@ bool Model::initialize(const QnnRuntimeConfig& runtime_cfg, const ModelConfig& m
+         {},
+         false,
+         false,
+-        static_cast<uint32_t>(resolved_cfg.log_level),
++        static_cast<uint32_t>(std::getenv("GENIEX_QNN_LOG_WARN") ? QNN_LOG_LEVEL_WARN : resolved_cfg.log_level),
+         qnnLogCallback,
+         model_cfg.enable_optrace,
+         model_cfg.optrace_output_path);
+diff --git a/core/src/threadpool.cpp b/core/src/threadpool.cpp
+index 408bc90..6c3b712 100644
+--- a/core/src/threadpool.cpp
++++ b/core/src/threadpool.cpp
+@@ -62,6 +62,17 @@ void ThreadPool::wait() {
+     }
+ }
+ 
++bool ThreadPool::setPolling(bool enabled) {
++    bool previous;
++    {
++        std::lock_guard<std::mutex> lock(mutex_);
++        previous = poll_;
++        poll_ = enabled;
++    }
++    job_cv_.notify_all();
++    return previous;
++}
++
+ void ThreadPool::loop() {
+ #if defined(__linux__)
+     if (cpu_mask_ != 0) {
+@@ -76,15 +87,14 @@ void ThreadPool::loop() {
+         std::function<void()> job;
+         {
+             std::unique_lock<std::mutex> lock(mutex_);
+-            if (poll_) {
+-                // Busy-spin: re-check under lock without blocking on the cv.
+-                while (!terminate_ && jobs_.empty()) {
++            while (!terminate_ && jobs_.empty()) {
++                if (poll_) {
+                     lock.unlock();
+                     std::this_thread::yield();
+                     lock.lock();
++                } else {
++                    job_cv_.wait(lock, [this] { return terminate_ || !jobs_.empty() || poll_; });
+                 }
+-            } else {
+-                job_cv_.wait(lock, [this] { return terminate_ || !jobs_.empty(); });
+             }
+             if (terminate_ && jobs_.empty()) return;
+             job = std::move(jobs_.front());
